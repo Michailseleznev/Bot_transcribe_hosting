@@ -1,55 +1,72 @@
-# Audio Transcribe Telegram Railway Bot
+# Bot Transcribe Hosting
 
-Отдельный Railway-совместимый Telegram-бот для транскрибации голосовых, аудио, видео, кружков и поддерживаемых документов с аудио.
+Railway-совместимый Telegram-бот, который распознаёт голосовые, аудио, видео, кружки и поддерживаемые документы через локальную модель `Whisper large-v3`.
+
+## Что изменилось
+
+- внешний STT API убран полностью;
+- распознавание идёт локально через `faster-whisper`;
+- по умолчанию используется `large-v3` c `compute_type=int8`, чтобы запуск на CPU Railway был реалистичнее;
+- деплой идёт через `Dockerfile`, а не через Node buildpack.
 
 ## Что умеет
 
 - принимает `voice`, `audio`, `video`, `video_note`;
-- принимает `document`, если контейнер поддерживается STT API;
-- сразу отвечает сообщением о старте распознавания;
+- принимает `document`, если контейнер поддерживается моделью;
+- сразу отвечает, что распознавание началось;
 - потом присылает транскрипцию текстом;
-- работает как обычный Node webhook-сервис, поэтому подходит для Railway без Cloudflare-специфики.
+- держит локальную in-memory очередь задач;
+- лениво загружает модель при первом распознавании, чтобы сервис не падал на первом старте из-за долгой загрузки.
 
 ## Ограничения
 
-- по Telegram Bot API облачный бот может скачать файл только до 20 МБ;
-- для `document` поддерживаются контейнеры `flac`, `m4a`, `mp3`, `mp4`, `mpeg/mpga`, `ogg`, `wav`, `webm`;
-- текущая очередь задач in-memory, поэтому при рестарте инстанса незавершённые распознавания могут потеряться.
+- Telegram Bot API позволяет облачному боту скачать только файлы до 20 МБ;
+- поддерживаемые контейнеры для `document`: `flac`, `m4a`, `mp3`, `mp4`, `mpeg/mpga`, `ogg`, `wav`, `webm`;
+- `Whisper large-v3` тяжёлый: для Railway желательно достаточно RAM и CPU;
+- без volume модель будет скачиваться заново после пересоздания контейнера;
+- при рестарте сервиса незавершённые задачи из in-memory очереди теряются.
 
 ## Переменные окружения
 
-Смотри шаблон в [.env.example](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/.env.example).
+Шаблон лежит в [.env.example](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/.env.example).
 
 Обязательные:
 
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
-- `OPENAI_API_KEY`
 
-Полезные опциональные:
+Основные настройки модели:
 
-- `OPENAI_TRANSCRIBE_MODEL`
-- `OPENAI_BASE_URL`
-- `TRANSCRIBE_LANGUAGE`
+- `WHISPER_MODEL_SIZE=large-v3`
+- `WHISPER_DEVICE=cpu`
+- `WHISPER_COMPUTE_TYPE=int8`
+- `WHISPER_CACHE_DIR=/tmp/whisper-cache`
+- `WHISPER_PRELOAD=0`
+
+Опциональные:
+
+- `TRANSCRIBE_LANGUAGE=ru`
 - `TRANSCRIBE_PROMPT`
-- `TRANSCRIBE_CONCURRENCY`
+- `TRANSCRIBE_CONCURRENCY=1`
 
 ## Локальный запуск
 
 ```bash
-cd "/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot"
-npm install
-cp .env.example .env
-npm run dev
+cd "/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting"
+docker build -t bot-transcribe-hosting .
+docker run --rm -p 3000:3000 \
+  -e TELEGRAM_BOT_TOKEN=123456:replace-me \
+  -e TELEGRAM_WEBHOOK_SECRET=replace-me \
+  bot-transcribe-hosting
 ```
 
 ## Railway
 
-1. Создай отдельный GitHub-репозиторий и запушь туда этот проект.
-2. В Railway выбери `Deploy from GitHub repo`.
-3. Добавь переменные окружения из `.env.example`.
-4. Build/start/healthcheck уже описаны в [railway.toml](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/railway.toml).
-5. После первого деплоя получишь публичный URL вида `https://...up.railway.app`.
+1. Подключи репозиторий `Bot_transcribe_hosting` в Railway.
+2. Railway должен использовать [Dockerfile](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/Dockerfile).
+3. Добавь env-переменные из `.env.example`.
+4. Очень желательно подключить volume и выставить `WHISPER_CACHE_DIR` в путь внутри volume, например `/data/whisper-cache`.
+5. После первого деплоя получишь URL вида `https://...up.railway.app`.
 6. Поставь Telegram webhook:
 
 ```bash
@@ -58,15 +75,21 @@ curl -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook" \
   -d "secret_token=$TELEGRAM_WEBHOOK_SECRET"
 ```
 
-Проверка:
+Проверка webhook:
 
 ```bash
 curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/getWebhookInfo"
 ```
 
-## Как устроен код
+Проверка health:
 
-- [src/index.ts](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/src/index.ts) поднимает HTTP-сервер, принимает webhook и гоняет задания через in-memory очередь;
-- [src/media.ts](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/src/media.ts) фильтрует типы медиа и лимиты;
-- [src/transcribe.ts](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/src/transcribe.ts) отправляет файл в STT API;
-- [src/telegram.ts](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Projects/audio-transcribe-telegram-railway-bot/src/telegram.ts) инкапсулирует Telegram Bot API.
+```bash
+curl "YOUR_RAILWAY_URL/health"
+```
+
+## Файлы проекта
+
+- [app.py](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/app.py) поднимает HTTP-сервис, очередь, Telegram webhook и локальную транскрибацию;
+- [requirements.txt](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/requirements.txt) содержит Python-зависимости;
+- [Dockerfile](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/Dockerfile) описывает образ для Railway;
+- [railway.toml](/Users/misha/Library/Mobile Documents/com~apple~CloudDocs/2. Области/Проги/Transcribe bot hosting/railway.toml) задаёт healthcheck и policy рестарта.
